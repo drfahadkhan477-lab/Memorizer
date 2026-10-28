@@ -1,0 +1,18 @@
+{
+  "name": "memorizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Memorizer: turn a PDF or study file into lessons, drills and spaced review. Offline-capable PWA.",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build-memorizer.js",
+    "serve": "node scripts/build-memorizer.js && node scripts/serve.js 8081 dist-memorizer",
+    "test": "node scripts/test.js",
+    "test:pure": "node scripts/test.js --pure",
+    "test:prepare": "node tests/_reader-assets.js --prepare"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

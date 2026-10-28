@@ -1,0 +1,4 @@
+node_modules/
+dist-memorizer/
+memorizer-cloudflare.zip
+.DS_Store

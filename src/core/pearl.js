@@ -1,0 +1,793 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   pearl.js — one fact from your own notes, on the home screen.
+
+   The hero is the first thing seen every morning and, below the wordmark, it
+   was chrome: a question count, a percentage, and a rhythm label naming the
+   trace behind it. Handsome, and it taught nothing. A board candidate opening
+   a study app should read something worth knowing before they read a metric.
+
+   WHERE THE PEARLS COME FROM. The reference notes already on the shelf —
+   Braunwald-sourced, written for this exam; 295 of them across heart failure,
+   ischaemic heart disease and the valvular unit at the time of writing.
+   Nothing is invented here and no second corpus is maintained: this only has
+   to *find* the good sentence in prose that already exists, so adding a unit
+   to content/refs/ adds its pearls with no further work.
+
+   WHAT MAKES A SENTENCE A PEARL. Not every sentence in a note survives being
+   pulled out of it. The ones that do are self-contained and carry a fact:
+
+     · a bolded term, which is how these notes mark the thing being taught;
+     · a number — a dose, a threshold, a cut-off, a trial year;
+     · a trial name in capitals.
+
+   And the ones that cannot survive are excluded by the same reasoning: a
+   sentence opening with "This", "That", "It" or "These" refers to the
+   paragraph it was lifted from, and reads as a non-sequitur alone.
+
+   WEIGHTED TOWARD WHERE YOU ARE WEAK. The app already computes weak chapters
+   for Apex's prompt, so a pearl can be aimed rather than merely random —
+   without asking a model, a network call, or a second data source. The
+   weighting is gentle: strongest chapters still appear, because a revision
+   tool that only ever shows your failures is a tool people stop opening.
+
+   Depends on app globals (REF, Profile, S) — embedded, not standalone.
+   ═══════════════════════════════════════════════════════════════════════════ */
+(function (root) {
+'use strict';
+
+/* A PEARL IS A COMPLETE THOUGHT, NOT A SHORT ONE. The first version capped a
+   pearl at 210 characters and required it to be exactly one sentence, on the
+   theory that one sentence is what you can hold. In use that was wrong twice
+   over: it threw away the sentence that gave a rule its exception, and it let
+   through 60-character clauses that were true but taught nothing. Length was
+   never the thing that made a pearl memorable — Pearl.steps() is, by breaking
+   whatever arrives at its own joints.
+
+   So the floor rises to something that has to contain a real claim, the
+   ceiling rises to a short paragraph, and a pearl may now be a RUN of up to
+   three consecutive sentences where they form one statement. */
+const MIN = 90, MAX = 700;
+const MAX_RUN = 3;                  // sentences; beyond this it is a paragraph, not a pearl
+const LEADS = /^(this|that|these|those|it|they|he|she|there|such|both|either|neither|hence|so|then|thus|however|instead|again)\b/i;
+
+/* Strip the note's markup back to the prose underneath. Figures go entirely —
+   a caption is not a pearl — and emphasis markers go after being used as a
+   signal for whether the sentence carries a taught term. */
+const CITE = /([a-z)\]])\.(\d{1,3}(?:\s?[,\u2013-]\s?\d{1,3})*)(?=\s|$)/g;
+function plain(body) {
+  return String(body || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')          // figures
+    .replace(/`[^`]*`/g, ' ')                        // code spans
+    .replace(/^#{1,6}\s+.*$/gm, ' ')                 // headings
+    /* Bullets and table rows are DROPPED, not unwrapped. A list item is
+       written to be read under its stem — "A falling antihypertensive
+       requirement…, which reflects declining stroke volume" is a noun phrase
+       with no main verb, and it passes every structural test while reading as
+       a non-sequitur on its own. Only prose sentences survive being quoted. */
+    .replace(/^\s*([-*·+]|\d+\.)\s+.*$/gm, ' ')      // list items
+    .replace(/^\s*\|.*$/gm, ' ')                     // table rows
+    /* PARAGRAPH BREAKS SURVIVE, where they used to be collapsed with every
+       other run of whitespace. Now that a pearl can be several sentences, the
+       boundary matters: two sentences either side of a blank line are two
+       different points, and joining them makes the non-sequitur this module
+       exists to avoid. Runs of spaces still collapse. */
+    /* A reference number the book set after a full stop, "…the latter group.43
+       Thus…": it hides the sentence boundary from sentences() and shows on the
+       card as a stray number. Digits straight after the stop, before a space
+       or the end, are a citation; a decimal or a figure number has a digit or
+       a space before its point. */
+    .replace(CITE, '$1.')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/* The note as paragraphs of sentences. A run may never cross a blank line. */
+function paragraphs(body) {
+  return plain(body).split(/\n{2,}/)
+    .map(p => p.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function sentences(text) {
+  /* Split on sentence enders, but not on the decimal points and abbreviations
+     these notes are full of — "0.5 mg", "vs.", "Fig. 54.1", "e.g." */
+  return text
+    .replace(/\b(vs|e\.g|i\.e|approx|Dr|Fig|No|cf)\.\s/gi, '$1<abbr> ')
+    /* The lookahead has to step over emphasis markers and an opening quote:
+       these notes bold the term being taught, so a sentence very often starts
+       "**Finerenone** is…", and looking only for a capital left two sentences
+       fused into one pearl that read as a non-sequitur.
+
+       NO LOOKBEHIND, DELIBERATELY. This used a lookbehind assertion on the
+       sentence ender — which says the same thing more directly, and is a
+       parse-time SyntaxError on iPadOS
+       Safari below 16.4. Not a caught exception: the whole enclosing <script>
+       block fails to compile, and that block also holds the rhythm registry,
+       the scheduler and most of the app. One unsupported character silently
+       took out everything on an older tablet, and nothing in the suite would
+       have said so, because the suite runs on Chromium.
+
+       Capturing the ender and re-attaching it does the same work with a
+       lookAHEAD only, which Safari has always had. The separator is NUL rather
+       than a text sentinel because prose cannot contain it — <abbr> above is
+       an established idiom in this function, but it is a string a note could
+       in principle write. */
+    .replace(/([.!?])\s+(?=[*_"'“(]*[A-Z(])/g, '$1\u0000')
+    .split('\u0000')
+    .map(s => s.replace(/<abbr>/g, '.').trim());
+}
+
+const BACKREF = /\b(as discussed|see the|earlier|the previous|(?:shown|described|discussed|mentioned|listed) (?:above|below))\b/i;
+
+/* A shared number or generic clinical word does not join two concepts.
+   Distinctive terms or an explicit continuation do. This is deliberately
+   conservative: no medical claim is rewritten or inferred. */
+const COMMON = new Set(('the and with without from that this these those which their there when where should must only within before after patients patient treatment therapy disease syndrome syndromes clinical first second most some have will would could dose doses days hours weeks months years given started measured reading finding marker invented synthetic').split(' '));
+function terms(text) {
+  return Array.from(new Set((clean(String(text)).toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) || [])
+    .filter(w => !COMMON.has(w) && !FINITE.test(w) && !ACT.test(w))));
+}
+function coherent(parts) {
+  for (let i = 1; i < parts.length; i++) {
+    if (/^(?:this|that|these|those|it|they|however|but|yet|therefore|thus|because|unless|instead|in contrast|for this reason)\b/i.test(parts[i])) continue;
+    const prior = terms(parts.slice(0, i).join(' '));
+    if (!terms(parts[i]).some(w => prior.includes(w))) return false;
+  }
+  return true;
+}
+
+/* A PEARL HAS TO BE A SENTENCE, NOT A LABEL. These notes use a bolded phrase
+   followed by a qualifier as a pseudo-bullet written as a paragraph:
+
+     "**A falling antihypertensive requirement over time** in a previously
+      hypertensive patient, which reflects declining stroke volume rather
+      than improving hypertension."
+
+   That is a noun phrase with no main verb. It is true, it is well written, and
+   quoted on its own it reads as a non-sequitur — the module already drops real
+   markdown bullets for exactly this reason, and this one escapes because it is
+   punctuated as a paragraph. So the test is structural rather than typographic:
+   strip any trailing subordinate clause and require a finite verb in what is
+   left. The example above reduces to "A falling antihypertensive requirement
+   over time in a previously hypertensive patient" and is refused. */
+const FINITE = new RegExp('\\b(is|are|was|were|be|been|being|has|have|had|does|do|did|can|could|'
+  + 'should|shall|must|may|might|will|would|remain|remains|become|becomes|cause|causes|reduce|reduces|'
+  + 'increase|increases|require|requires|predict|predicts|occur|occurs|present|presents|reflect|reflects|'
+  + 'show|shows|suggest|suggests|prevent|prevents|improve|improves|worsen|worsens|carry|carries|confer|'
+  + 'confers|need|needs|mean|means|make|makes|give|gives|leave|leaves|add|adds|fall|falls|rise|rises|'
+  + 'begin|begins|start|starts|stop|stops|follow|follows|depend|depends|differ|differs|exceed|exceeds|'
+  + 'produce|produces|drive|drives|explain|explains|support|supports|favour|favours|favor|favors)\\b', 'i');
+function hasMainVerb(raw) {
+  const main = String(raw).replace(/,\s*(which|who|whom|whose|where|whereas|although|though|because|while)\b[\s\S]*$/i, '');
+  return FINITE.test(main);
+}
+
+/* Is this ONE sentence usable as part of a pearl? Length is not judged here —
+   a run is judged as a whole — and neither is the opening pronoun, because
+   "This is why…" is perfectly good as the second sentence of a statement and
+   only fails as the first. */
+function usable(raw) {
+  const s = raw.trim();
+  if (!s) return false;
+  if (!/[.!?]$/.test(s)) return false;               // a fragment, or a clipped tail
+  if (BACKREF.test(s)) return false;                 // points outside the pearl
+  return true;
+}
+
+/* Does this stand up on its own, away from its paragraph? Kept as the single
+   exported predicate, and it now accepts a run as readily as a sentence. */
+function isPearl(raw) {
+  /* JUDGED ON WHAT IS DISPLAYED, not on the markup it came from. clean() strips
+     the bold markers, and these notes write a lead-in as "**R1 — epicardial
+     conduit arteries.** Normally there is…" — with the full stop INSIDE the
+     bold span. In the raw text that is one sentence; cleaned, it is two. Both
+     the length and the sentence boundaries therefore have to be measured after
+     cleaning, or the module is deciding about a string nobody will ever read. */
+  const s = clean(String(raw || '')).trim();
+  if (s.length < MIN || s.length > MAX) return false;
+  if (LEADS.test(s)) return false;                   // the FIRST sentence may not
+  /* A figure's caption, a table's title or an extraction stub is not a statement about a patient: "Caption: FIG. 67.7
+     Five-year cumulative incidence…" passed every test below and was shown as a pearl titled "Caption:". */
+  if (NOT_PROSE.test(s)) return false;
+  const parts = sentences(s);
+  if (parts.length > MAX_RUN + 1) return false;      // +1: cleaning can split a lead-in
+  if (!parts.every(usable)) return false;
+  if (!coherent(parts)) return false;
+  /* A main clause has to arrive early, but not necessarily in the first
+     sentence: "R1 — epicardial conduit arteries." is a label, and the statement
+     it labels is the sentence after it. Requiring the verb in sentence one
+     would throw away that whole shape, which is a good one. Two sentences is
+     the grace, and the verbless fragment this test exists to catch is a single
+     sentence, so it is still refused. */
+  return hasMainVerb(parts.slice(0, 2).join(' '));
+}
+
+/* Every run of one to MAX_RUN consecutive sentences within one paragraph.
+   Longest first, so an equal score prefers the fuller statement — which is the
+   whole point of the change. */
+function runs(sents) {
+  const out = [];
+  for (let n = Math.min(MAX_RUN, sents.length); n >= 1; n--) {
+    for (let i = 0; i + n <= sents.length; i++) out.push(sents.slice(i, i + n).join(' '));
+  }
+  return out;
+}
+
+/* Higher is better. The first version scored capitals and digits, and promoted
+   "Key transcription factors include GATA4, Nkx2.5, SRF, MEF2 and NFAT" to the
+   top of the pile — every signal it looked for, and nothing anyone can use in
+   an exam. A list of names is the shape that games a naive score, so it is
+   named and penalised here rather than left to be outweighed.
+
+   What actually makes a board pearl is a DECISION or a DISCRIMINATION: a
+   threshold you act on, a rule with an exception, one thing told from another.
+   That is what the weights below reward. */
+const NOT_PROSE = /^(?:caption\b|(?:fig(?:ure)?|table|box|panel)\.?\s*[\dA-Z]|extracted text\b|source:|page \d)/i;
+/* A pearl has to SAY something to act on or tell apart: a threshold with its unit, an instruction, a contrast or a
+   cause. Notes carry many true sentences that are descriptions ("Primary causes of death are as reported on the…"),
+   and a score built from length and digits let them through. */
+const CLAIM = /\b(should|must|never|always|only|first-line|contraindicat\w*|indicated|recommended|reduce[sd]?|increase[sd]?|lower(?:s|ed)?|raise[sd]?|improve[sd]?|worsen\w*|predict\w*|associated with|caused? by|due to|leads? to|results? in|more likely|less likely|most common|hallmark|diagnos\w+|treat\w*|unlike|whereas|rather than|versus|in contrast)\b/i;
+const ENUM = /\b(include|includes|including|such as|for example|comprise|consist)\b/i;
+const ACT  = /\b(should|must|never|always|only|first-line|contraindicat\w*|indicated|requires?|avoid|before|within|at least|no longer|instead of|failure to)\b/i;
+const DISC = /\b(distinguish\w*|differentiat\w*|unlike|whereas|rather than|versus|vs\.?|in contrast|but not|as opposed to|mistak\w+|misread)\b/i;
+const UNIT = /\d\s?(?:%|(?:mg|mcg|g|mmhg|ml|l\/min|hours?|hrs?|days?|weeks?|months?|years?|beats|bpm|mm|cm|msec|ms|meq|mmol)\b)/i;
+const TRIAL = /\b[A-Z][A-Z0-9-]{3,}\b/;
+
+function score(raw) {
+  let n = 0;
+  if (/\*\*[^*]+\*\*/.test(raw)) n += 2;             // a term the note bolded
+  if (UNIT.test(raw)) n += 4;                        // a real threshold, not just a digit
+  else if (/\d/.test(raw)) n += 1;
+  if (ACT.test(raw)) n += 3;                         // tells you what to do
+  if (DISC.test(raw)) n += 3;                        // tells one thing from another
+  if (TRIAL.test(raw)) n += 1;                       // PARADIGM, COAPT, STICH
+  /* Retuned for the new range. The old bonus peaked at 90-175 characters,
+     which after the ceiling moved would have gone on quietly preferring the
+     shortest thing that qualified — the exact complaint this is fixing. A
+     complete statement in these notes runs about 150-450 characters. */
+  if (raw.length >= 150 && raw.length <= 450) n += 2;
+  else if (raw.length > 450) n += 1;
+  /* A rule and its qualification in one breath is the shape of a real pearl,
+     and it is almost always two sentences rather than one. */
+  if (ACT.test(raw) && DISC.test(raw)) n += 2;
+
+  /* An enumeration of proper nouns reads as a glossary entry pulled out of
+     context. Commas are the tell: four or more in one sentence is a list. */
+  if (ENUM.test(raw)) n -= 4;
+  if ((raw.match(/,/g) || []).length >= 4) n -= 3;
+  if (/\band\s+[A-Z]\w*\.\s*$/.test(raw)) n -= 2;    // "…, X and Y." — ends mid-list
+  return n;
+}
+
+function clean(raw) {
+  return raw
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    /* Splitting a sentence out of a paragraph can sever a bold span, leaving
+       an opening ** with its partner in the next sentence. Balanced-pair
+       removal cannot see those, so anything still standing goes here — these
+       are markup characters, and none of them belongs in clinical prose. */
+    .replace(/[*_`]/g, '')
+    /* What the PDF left in the notes: a word broken across a line ("Fol- low-up"), and the book's page number
+       "(p. 927)", which tells a reader nothing on a card. A hyphen before "and", "or" or "to" is the writer's
+       ("short- and long-term") and stays. */
+    .replace(/\b([A-Za-z]{2,})- (?!(?:and|or|to|nor)\b)([a-z]{2,})/g, '$1$2')
+    .replace(/\s*\((?:pp?\.|page)\s*\d+(?:\s*[-–]\s*\d+)?\)/gi, '')
+    .replace(CITE, '$1.')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .trim();
+}
+
+/* The search harvest makes for one note: which run of which paragraph is its
+   best pearl, and its score, or null. Runs are visited in exactly the order
+   runs() yields them, longest first, and kept only when strictly better, so
+   among equals the fuller statement — the first one seen — wins. */
+function bestRun(body) {
+  let best = null;
+  paragraphs(body).forEach((para, p) => {
+    const sents = sentences(para);
+    for (let n = Math.min(MAX_RUN, sents.length); n >= 1; n--) {
+      for (let i = 0; i + n <= sents.length; i++) {
+        const run = sents.slice(i, i + n).join(' ');
+        if (!isPearl(run) || !teaching(run)) continue;
+        const sc = score(run);
+        if (!best || sc > best.score) best = { p, i, n, score: sc, run };
+      }
+    }
+  });
+  return best;
+}
+
+/* Results belong in the source note; a pearl should teach its interpretation.
+   Keep this filter in Systole's harvest so shared sentence helpers retain
+   their meaning for the Memorizer. */
+function teaching(raw) {
+  const t = clean(raw);
+  /* ACT and DISC are what score() rewards; a run scored for "requires…" or "distinguished from…" is a claim too. Held to
+     CLAIM alone, the owner's notes lost pearls that had nothing wrong with them (22 October 2026). */
+  if (!CLAIM.test(t) && !ACT.test(t) && !DISC.test(t) && !UNIT.test(t)) return false;
+  const opening = t.split(',')[0].split(/\s+/).slice(0, 6).join(' ');
+  if (/\b(similarly|likewise|also|another|the latter|the former|utili[sz]ing|as with|as noted)\b/i.test(opening)) return false;
+  return !/\b(?:HR|OR|RR|CI)\s*[:=,]?\s*\(?\d|\b[Pp]\s*[=<>≤≥]\s*0?\.\d|\b(?:hazard|odds|risk) ratios?\b|\bconfidence intervals?\b|\bpatient-years?\b/.test(t);
+}
+
+/* The note's text, fingerprinted: FNV-1a, the hash the app already keys its
+   seeded notes by. Kept here so the build and the app use one implementation. */
+function bodyKey(body) {
+  const s = String(body || '');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+
+/* THE HARVEST, BAKED. Scanning every run of every paragraph of every note runs
+   a dozen regular expressions thousands of times; on the owner's laptop at an
+   iPad's pace it was the largest cost left at launch, blocking the page just
+   after the home screen appeared. The notes the app is seeded with are known
+   at build time, so scripts/pearl-bake.js runs bake() over them there and the
+   app carries the result.
+
+   The table holds no text: per note fingerprint, where its pearl is and its
+   score. harvest() rebuilds the run from the note it is given and uses the
+   entry only if that run is still a pearl with that score; anything else — no
+   table, no entry, an edited note, an entry that does not fit — and the note is
+   searched exactly as before. So what is shown is always this code's verdict on
+   the note as it stands, and a table can only ever save time.
+
+   A NOTE WITH NO PEARL HAS NO ENTRY, AND IS SEARCHED. "None" cannot be
+   re-checked the way a span is: checking that a note has no pearl is the search
+   itself. An entry saying so would be taken on the 32-bit fingerprint alone, and
+   a note you wrote that collided with a seeded no-pearl note would lose its
+   pearl with nothing to notice. (An earlier version stored the note's length to
+   make that rarer; the owner chose the full guarantee over the time.) A span
+   entry cannot hide anything: on the wrong note it fails its checks and the note
+   is searched.
+
+   WHERE, AS A SPAN OF THE RAW NOTE. The first table named the run by
+   paragraph and sentence index, and the owner's profile showed what that
+   cost: the scoring was gone, but reaching paragraph p still ran plain() over
+   the whole note, and that walk was most of what the search had cost. A run
+   is its stretch of the note with the whitespace collapsed — sentences()
+   splits on whitespace and joins with one space — so an entry is
+   [start, end, score], a span of the raw body, and the lookup's text work is
+   on that span alone (the fingerprint and the figure search still pass over
+   the note once, without cleaning it). bake() keeps an entry only if the span, collapsed, is exactly the run
+   the search found; a run whose stretch holds something plain() strips (a
+   code span, a figure) has no such span, and that note is left out of the
+   table, so it is searched. */
+const collapse = s => s.replace(/\s+/g, ' ').trim();
+
+function bake(notes) {
+  const table = {};
+  for (const r of (notes || [])) {
+    const body = String(r.body || '');
+    const b = bestRun(body);
+    if (!b || b.score < 5) continue;
+    /* The run's words, with any whitespace between them, in the raw note.
+       Build time only: a RegExp per note is nothing here, and the app never
+       makes one. */
+    const m = new RegExp(b.run.split(' ').map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')).exec(body);
+    const e = m && [m.index, m.index + m[0].length, b.score];
+    if (e && collapse(body.slice(e[0], e[1])) === b.run && fromTable(body, e)) table[bodyKey(body)] = e;
+  }
+  return table;
+}
+
+/* A table entry checked against the note it claims to describe. */
+function fromTable(body, e) {
+  if (!Array.isArray(e) || e.length !== 3 || !e.every(Number.isInteger)) return undefined;
+  body = String(body || '');
+  if (!(e[0] >= 0 && e[0] < e[1] && e[1] <= body.length)) return undefined;
+  const run = collapse(body.slice(e[0], e[1]));
+  if (!isPearl(run) || !teaching(run) || score(run) !== e[2]) return undefined;
+  return { score: e[2], run };
+}
+
+/* One entry per note: its best sentence, and how good that sentence is. Notes
+   with nothing quotable simply do not appear. `table` is optional (see bake). */
+function harvest(notes, table) {
+  const out = [];
+  const has = table && typeof table === 'object' ? k => Object.prototype.hasOwnProperty.call(table, k) : null;
+  for (const r of (notes || [])) {
+    let best;
+    if (has) {
+      const k = bodyKey(r.body);
+      if (has(k)) best = fromTable(r.body, table[k]);
+    }
+    if (best === undefined) best = bestRun(r.body);
+    if (best && best.score >= 5) {
+      const context = passageContext(r.body, best.run, r.title);
+      const fig = matchingFigure(r.body, best.run, context);
+      out.push({ id: r.id, title: r.title || '', text: clean(best.run), score: best.score,
+                 chapter: (r.title || '').split('—')[0].trim(), source: r.source || '',
+                 concept: context.concept,
+                 figKey: fig ? fig.key : '', figCap: fig ? fig.caption : '' });
+    }
+  }
+  return out;
+}
+
+/* Locate the exact passage in raw Markdown. A passage crossing stripped
+   markup may have no contiguous span; in that case no figure is guessed. */
+function passageSpan(body, run) {
+  /* The passage's words one after another with whitespace between them, as a pattern of them says it, found by looking
+     rather than by compiling a pattern for each note: the compile was most of what harvest() cost at every launch and
+     after every edit to the library. Words are what split() leaves between whitespace, so none holds any; whitespace at
+     either end of the run leaves an empty word there, which asks for whitespace at that end of the match, and is found
+     the same way. */
+  const words = run.split(/\s+/);
+  body = String(body || '');
+  const first = words[0];
+  for (let at = body.indexOf(first); at !== -1; at = at < body.length ? body.indexOf(first, at + 1) : -1) {
+    let end = at + first.length, i = 1;
+    for (; i < words.length; i++) {
+      let next = end;
+      while (next < body.length && /\s/.test(body[next])) next++;
+      if (next === end || !body.startsWith(words[i], next)) break;
+      end = next + words[i].length;
+    }
+    if (i === words.length) return { index: at };
+  }
+  return null;
+}
+function passageContext(body, run, title) {
+  body = String(body || '');
+  const span = passageSpan(body, run);
+  const headings = Array.from(body.matchAll(/^#{1,6}\s+(.+)$/gm));
+  const before = span && headings.filter(h => h.index < span.index);
+  const heading = before && before.length ? clean(before[before.length - 1][1]) : '';
+  const frame = /^(?:In|For|With)\s+([^,;:.]{3,90})[,;]/i.exec(clean(run));
+  /* A title has to name a topic. A bold run that is a label ("Caption:"), a grade ("Class IIb", "LOE B") or a number,
+     and a heading the extraction wrote ("Extracted text (7)", "Page 12"), name nothing; the next candidate is taken. */
+  const topic = t => !!t && /[a-z]{3}/i.test(t) && t.length <= 90 && !/:\s*$/.test(t) &&
+    !/^(?:class\s+(?:i{1,3}|iv)[ab]?|loe\b|level of evidence|grade\b|caption|figure|fig\.|table|extracted text|page\b|text\b|notes?\b|summary\b|key points?\b)/i.test(t) &&
+    !/^[\d\s.,%()–-]+$/.test(t);
+  /* Emphasis can mark a recommendation, a grade, or an exception's subject.
+     Only topical spans in the opening sentence can name the main idea. Walk
+     past a grade rather than letting the first bold span decide everything.
+     This selects source words; it never generates a clinical heading. */
+  const bold = Array.from(sentences(run)[0].matchAll(/\*\*([^*]+)\*\*/g), m => clean(m[1]))
+    .find(t => topic(t) && !FINITE.test(t) && !ACT.test(t) && !UNIT.test(t));
+  /* A heading or a title is held to more than "names something". The notes
+     carry headings the extraction cut from running prose — two words and a
+     comma, "Outweigh, uncommon" — which are words of the book, but not a topic
+     a reader can file the pearl under. A list of single words, a phrase that
+     opens in lower case or with a verb, or one with no content word, is passed
+     over, and the passage is asked instead (subject()). */
+  const named = t => {
+    if (!topic(t) || /^[a-z]/.test(t) || FINITE.test(t.split(/\s+/)[0]) || ACT.test(t.split(/\s+/)[0])) return false;
+    const parts = t.split(/\s*[,;]\s*/).filter(Boolean);
+    if (parts.length > 1 && parts.every(part => !/\s/.test(part))) return false;
+    return (t.match(/[A-Za-z][A-Za-z-]{3,}/g) || []).some(w => !COMMON.has(w.toLowerCase()));
+  };
+  const pick = [bold, frame && frame[1]].find(topic) ||
+    [heading, String(title || '').split('—').pop().trim()].find(named) || subject(run);
+  const concept = pick || 'From your notes';
+  return { concept, span, headings };
+}
+/* THE PASSAGE'S OWN SUBJECT, from its own words. When the note gives no usable
+   name, the heading is built from what the passage keeps returning to: the
+   commonest "modifier + head noun" pair ("invasive strategy") and the
+   abbreviation it is about ("NSTE-ACS"), as "Invasive strategy in NSTE-ACS".
+   Every word is the source's; nothing is inferred, and a passage with neither
+   gets no heading of this kind. */
+const HEAD = /^(?:strategy|therapy|approach|treatment|management|revasculari[sz]ation|anticoagulation|ablation|implantation|replacement|repair|imaging|testing|criteria|score|risk|dysfunction|stenosis|regurgitation|failure|syndrome|infarction|cardiomyopathy|hypertension|fibrillation|flutter|block|tachycardia|bradycardia|pressure|gradient|fraction|perfusion|isch(?:a)?emia|angina|disease|inhibitors?|blockers?|antagonists?|agents?|pacing|shock|thrombosis|embolism|aneurysm|dissection|effusion|tamponade|pericarditis|myocarditis|endocarditis|murmur|interval|hypertrophy|remodell?ing|prophylaxis|monitoring|screening|surveillance|closure|valve|valvuloplasty|occlusion|sedation|rehabilitation)$/i;
+const PLAIN = new Set(('versus early late later latter former absence presence group groups appropriate subsequent apparent benefit benefits part '
+  + 'high higher low lower long short term same other such each more less many much several').split(' '));
+const NOT_ACR = new Set(['HR', 'OR', 'RR', 'CI', 'LOE', 'II', 'III', 'IV', 'VI', 'NB', 'USA', 'UK']);
+function subject(run) {
+  const words = clean(String(run || '')).split(/[^A-Za-z0-9-]+/).filter(Boolean);
+  const content = w => w.length >= 4 && !/^\d/.test(w) && !COMMON.has(w.toLowerCase()) && !PLAIN.has(w.toLowerCase()) &&
+    !FINITE.test(w) && !ACT.test(w) && !HEAD.test(w) && !/^[A-Z0-9-]+$/.test(w);
+  const freq = {};
+  for (const w of words) { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; }
+  const pairs = {};
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (content(words[i]) && HEAD.test(words[i + 1])) {
+      const k = (words[i] + ' ' + words[i + 1]).toLowerCase();
+      pairs[k] = (pairs[k] || 0) + 1;
+    }
+  }
+  let phrase = '', best = -1;
+  for (const k of Object.keys(pairs)) {
+    const [a, b] = k.split(' ');
+    const sc = pairs[k] * 3 + freq[a] + freq[b];
+    if (sc > best) { best = sc; phrase = k; }
+  }
+  const acrs = {};
+  for (const w of words) {
+    if (/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$/.test(w) && (w.length >= 3 || w.includes('-')) && !NOT_ACR.has(w) && !/^[IVX]+$/.test(w)) acrs[w] = (acrs[w] || 0) + 1;
+  }
+  let acr = '', n = 0;
+  for (const k of Object.keys(acrs)) if (acrs[k] > n) { n = acrs[k]; acr = k; }
+  if (phrase) return phrase[0].toUpperCase() + phrase.slice(1) + (acr ? ' in ' + acr : '');
+  return acr;
+}
+function matchingFigure(body, run, context) {
+  body = String(body || '');
+  /* harvest() has the passage's context already, made for the same body and the same run: the title it was made with
+     changes the concept and nothing this reads. */
+  context = context || passageContext(body, run, '');
+  if (!context.span) return null;
+  const at = context.span.index;
+  const preceding = context.headings.filter(h => h.index < at);
+  const start = preceding.length ? preceding[preceding.length - 1].index : 0;
+  const following = context.headings.find(h => h.index > at);
+  const end = following ? following.index : body.length;
+  const words = terms(run);
+  let best = null;
+  for (const m of body.matchAll(/!\[([^\]]*)\]\(refimg:\/\/([^)\s]+)\)/g)) {
+    if (m.index < start || m.index >= end) continue;
+    const overlap = terms(m[1]).filter(w => words.includes(w));
+    // A long distinctive subject or two shared terms, never proximity alone.
+    if (overlap.length < 2 && !overlap.some(w => w.length >= 6)) continue;
+    const rank = overlap.length * 1000 - Math.min(Math.abs(m.index - at), 999);
+    if (!best || rank > best.rank) best = { key: m[2], caption: m[1], rank };
+  }
+  return best;
+}
+
+/* Whole sentences establish the main idea; clause joints make its supporting
+   detail scannable. Labels name the source relationship, not an inferred
+   diagnosis or treatment recommendation. */
+function lesson(text) {
+  const blocks = sentences(String(text || '')).filter(Boolean).flatMap(s => steps(s));
+  return blocks.map((s, i) => {
+    const t = (s.lead ? s.lead + ' ' : '') + s.text;
+    const label = i === 0 ? 'Core idea'
+      : /^(?:but|however|yet|unless|except|although|though|without)\b/i.test(t) ? 'Caveat'
+      : /^(?:whereas|unlike|in contrast|rather than|versus)\b/i.test(t) ? 'Contrast'
+      : /^(?:because|since|so|therefore|thus|resulting|leading|meaning)\b/i.test(t) ? 'Why it matters'
+      : /^(?:if|when|provided)\b/i.test(t) ? 'Condition' : 'Detail';
+    return { lead: s.lead, text: s.text, label };
+  });
+}
+
+/* Weak-chapter weighting, done on words rather than on an exact chapter match:
+   note titles ("HFrEF guideline-directed therapy — Devices") and question-bank
+   chapters ("Heart Failure & Cardiomyopathies") name the same territory and
+   almost never the same string. */
+/* WEAK MEANS BELOW YOUR OWN AVERAGE, NOT MERELY IN THE BOTTOM THREE.
+   weakChapters is a ranking — the lowest N with a meaningful sample — so when
+   few chapters have been attempted, the strongest one is on it too. That was
+   harmless while the shelf held no arrhythmia notes. With a 235-note
+   arrhythmias unit on it, a fellow scoring 28/30 there and 4/30 in heart
+   failure had both chapters aimed at, the 93% one included; the boost spread
+   over half the shelf and verify-pearl measured the weak chapter at 1.23x its
+   share, under its 1.25 floor. A chapter at or above the fellow's pooled
+   accuracy is not weak, whatever its rank, so it is not aimed at. With a
+   single chapter attempted there is nothing to be weak relative to, and
+   nothing is aimed — a uniform draw, which is what no evidence should give. */
+function weakWords(limit) {
+  try {
+    if (typeof Profile === 'undefined') return [];
+    const rows = Profile.weakChapters(6, Infinity);
+    let correct = 0, total = 0;
+    for (const w of rows) { correct += w.correct; total += w.total; }
+    const mean = total ? correct / total * 100 : 0;
+    const words = [];
+    for (const w of rows.filter(r => r.pct < mean).slice(0, limit || 3)) {
+      for (const t of String(w.ch).toLowerCase().split(/[^a-z]+/)) {
+        if (t.length > 4) words.push(t);
+      }
+    }
+    return words;
+  } catch (_) { return []; }
+}
+
+function weightOf(p, words) {
+  if (!words.length) return 1;
+  const hay = (p.title + ' ' + p.source).toLowerCase();
+  return words.some(w => hay.includes(w)) ? 3 : 1;
+}
+
+/* A WORD THAT MATCHES EVERYTHING AIMS AT NOTHING.
+ *
+ * weakWords splits a chapter name into its words, and weightOf matches those
+ * against the pearl's title AND ITS SOURCE. But every source on this shelf
+ * begins "Braunwald's Heart Disease", so the token "heart", taken from the
+ * chapter name "Heart Failure & Cardiomyopathies", matched every pearl in the
+ * library. weightOf then returned 3 for all of them — and a multiplier applied
+ * uniformly cancels out of a weighted draw completely. The aiming this module
+ * exists for was doing nothing at all.
+ *
+ * It survived because the shelf used to be mostly heart failure. A uniform
+ * draw still returned plenty of heart-failure pearls, so the check that
+ * watched this passed on the base rate rather than on any weighting. Adding a
+ * unit that shares none of those words dropped the base rate and exposed it:
+ * measured over 273 pearls the weak chapter came back at 0.89x its own share
+ * of the shelf, which is to say the draw was indistinguishable from uniform.
+ *
+ * So a word earns its place only if it actually divides the pool. This is the
+ * same reasoning as the inverse document frequency the search index already
+ * uses, applied to the one place that was missing it, and it needs no list of
+ * stop-words to maintain: a word that stops discriminating stops being used,
+ * whatever the corpus grows into. */
+const AIM_CEILING = 0.5;    // matches more than half the shelf → carries no signal
+
+function aimWords(pool, words) {
+  if (!words || !words.length || !pool || !pool.length) return [];
+  const cap = pool.length * AIM_CEILING;
+  return words.filter(w => {
+    let n = 0;
+    for (const p of pool) {
+      if ((p.title + ' ' + p.source).toLowerCase().includes(w) && ++n > cap) return false;
+    }
+    return n > 0;
+  });
+}
+
+/* Weighted pick, with the previous pearl excluded so "next" always moves. */
+function pick(pearls, prevId, rand) {
+  const r = rand || Math.random;
+  const list = pearls.filter(p => p.id !== prevId || pearls.length === 1);
+  if (!list.length) return null;
+  const words = aimWords(list, weakWords(3));
+  const weights = list.map(p => weightOf(p, words) * (1 + p.score / 10));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let t = r() * total;
+  for (let i = 0; i < list.length; i++) {
+    t -= weights[i];
+    if (t <= 0) return list[i];
+  }
+  return list[list.length - 1];
+}
+
+/* ═══ One sentence, broken at its own joints ═══════════════════════════════
+   A pearl is one sentence, and one sentence is a wall. Broken where it
+   already bends — at a colon, at a semicolon, at the connective that
+   introduces a consequence or a caveat — it becomes a short ladder, and a
+   ladder is what gets memorised. "Clinical restenosis is a different process:
+   intimal hyperplasia, generally developing within the first 6–9 months,
+   presenting as recurrent angina rather than an acute event" is four facts
+   wearing the costume of one; numbered, it is four things to remember.
+
+   Nothing is invented and nothing is reordered. Every step is a span of the
+   original sentence, in sequence.
+
+   THE EM-DASH IS THE ONE AMBIGUOUS JOINT. A single one is a real break —
+   "…risk becomes roughly linear — so the first six months are where
+   prevention earns its benefit". A PAIR is a parenthesis: "Oral beta-blockers
+   should be started within the first 24 hours — a Class I recommendation — in
+   patients without contraindications." Cutting inside that leaves a fragment
+   and an aside pretending to be steps, so the cut is only made when there is
+   exactly one dash to make it at.
+
+   THE LABEL IS LIFTED, NOT DUPLICATED. A step opening "so …" is tagged SO and
+   loses the word, because printing it in both places reads as a stutter. Only
+   connectives whose removal is grammatically inert are lifted — "so", "but",
+   "or", "and", "after which". "Because", "if", "unless" and "which" carry
+   meaning inside the clause and are left exactly where the author put them. */
+
+const CONNECTIVES =
+  'so|but|which|because|since|whereas|although|though|yet|unless|provided|or|and|with|without|' +
+  'after which|then|if|when|while|resulting|leading|presenting|showing|developing|meaning|' +
+  'performed|given|producing|causing|followed|' +
+  /* a purpose clause followed by its instruction — "To avoid X, use Y" */
+  'use|give|start|consider|check|avoid|treat|prefer|repeat|stop';
+
+/* Lifted into the step's label. Deliberately short: every entry here is a word
+   the sentence still reads correctly without. */
+const LIFT = [
+  [/^(?:so|therefore|thus|hence)\b[,]?\s+/i,   'so'],
+  [/^(?:but|however|yet)\b[,]?\s+/i,           'but'],
+  [/^(?:after which|then)\b[,]?\s+/i,          'then'],
+  [/^or\b\s+/i,                                'or'],
+  [/^and\b\s+/i,                               ''],
+];
+
+const MIN_STEP = 16;   // shorter than this is an aside, not a step
+const WEAK_MIN = 30;   // "…, or X" needs to be a clause, not the tail of a list
+const MAX_STEPS = 5;   // more than five is a list again
+
+/* NOTHING INSIDE BRACKETS IS A JOINT. "…a reduced event rate (26.9 vs 31.5
+   per 1,000 patient-years; HR 0.86; P = .02), over …" was cut at its
+   semicolons, and the owner's home screen showed a step ending on an open
+   bracket and the next beginning inside it. A separator inside ( ) or [ ]
+   is swapped for a control character before the cut and put back after, so
+   every step's brackets close where they opened. An unclosed bracket shields
+   the rest of the sentence: no cut is better than a wrong one. */
+const SHIELD = { ';': '\u0001', ':': '\u0002', ',': '\u0003', '—': '\u0004', '–': '\u0005' };
+const UNSHIELD = { '\u0001': ';', '\u0002': ':', '\u0003': ',', '\u0004': '—', '\u0005': '–' };
+function shield(t) {
+  let depth = 0, out = '';
+  for (const ch of t) {
+    if (ch === '(' || ch === '[') depth++;
+    else if ((ch === ')' || ch === ']') && depth) depth--;
+    out += depth && SHIELD[ch] ? SHIELD[ch] : ch;
+  }
+  return out;
+}
+const unshield = t => t.replace(/[\u0001-\u0005]/g, c => UNSHIELD[c]);
+
+function steps(text) {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  const ts = shield(t);
+
+  const dashes = (ts.match(/\s[—–]\s/g) || []).length;
+  /* Captured, not consumed: a piece that turns out not to be a step has to be
+     put back the way it was found, and that needs the separator it was cut at. */
+  const cut = new RegExp(
+    '(:\\s+' +
+    '|;\\s+' +
+    (dashes === 1 ? '|\\s[—–]\\s' : '') +
+    '|,\\s+(?=(?:' + CONNECTIVES + ')\\b))', 'i');
+
+  const raw = ts.split(cut).map(x => x === undefined ? x : unshield(x));
+  const pieces = [{ sep: '', text: (raw[0] || '').trim() }];
+  for (let i = 1; i < raw.length; i += 2) {
+    const body = (raw[i + 1] || '').trim();
+    if (body) pieces.push({ sep: raw[i], text: body });
+  }
+
+  const join = (a, b) => a.text + (/^\s*[,;:]/.test(b.sep) ? b.sep.replace(/\s+$/, ' ') : ' — ') + b.text;
+
+  /* Three ways a piece is not a step of its own:
+       · it is too short to stand up — an apposition, "…, 42% versus 31%";
+       · it is the tail of a list rather than a new clause — "…, or refractory
+         angina" closes "haemodynamic instability, cardiogenic shock, or
+         refractory angina", and cutting there leaves the list beheaded;
+       · the FIRST piece is short, which the others' rule cannot fix because
+         there is nothing behind it to fold into.
+     The first two fold backwards, the third forwards, and all three keep the
+     separator they were cut at, so the sentence survives being rejoined. */
+  const weak = p => /^(?:or|and)\b/i.test(p.text);
+  /* "…on admission, or in whom these features develop later" continues the
+     clause it was cut from: a relative clause has no subject of its own, so
+     however long it is, it is not a step. */
+  const continuation = p => /^(?:or|and)\s+(?:(?:in|for|of|to|with|from)\s+)?(?:whom|who|which|whose|where|when)\b/i.test(p.text);
+  const merged = [];
+  for (const p of pieces) {
+    const tooShort = p.text.length < MIN_STEP;
+    const listTail = (weak(p) && p.text.length < WEAK_MIN) || continuation(p);
+    if (merged.length && (tooShort || listTail)) {
+      merged[merged.length - 1] = { sep: merged[merged.length - 1].sep,
+                                    text: join(merged[merged.length - 1], p) };
+    } else merged.push(p);
+  }
+  while (merged.length > 1 && merged[0].text.length < MIN_STEP) {
+    const head = merged.shift();
+    merged[0] = { sep: head.sep, text: join(head, merged[0]) };
+  }
+  while (merged.length > MAX_STEPS) {
+    const tail = merged.pop();
+    merged[merged.length - 1] = { sep: merged[merged.length - 1].sep,
+                                  text: join(merged[merged.length - 1], tail) };
+  }
+  if (merged.length < 2) return [{ lead: '', text: t.replace(/\s*\.$/, '') }];
+
+  return merged.map((piece, i) => {
+    let body = piece.text, lead = '';
+    if (i > 0) {
+      for (const [re, label] of LIFT) {
+        if (re.test(body)) { body = body.replace(re, ''); lead = label; break; }
+      }
+    }
+    /* A step opens a line of its own, so it is given a capital — except where
+       the first word is cased the way the notes cased it: a gene, a trial name,
+       a drug whose lower-case initial is the term. A step with a lead is drawn
+       after it, in the same line ("So the first six months…"), and the lead
+       takes the capital: the owner's iPad read "so It is…". */
+    if (!lead && body && /^[a-z]/.test(body) && !/^[a-z]+[A-Z0-9]/.test(body)) {
+      body = body.charAt(0).toUpperCase() + body.slice(1);
+    }
+    /* No step ends in a full stop. Only the last one would have had one, and a
+       ladder where the final rung alone is punctuated looks like an error. */
+    return { lead, text: body.replace(/[,;:]\s*$/, '').replace(/\s*\.$/, '') };
+  }).filter(s => s.text);
+}
+
+/* Does this table entry fit this note — would harvest() use it rather than
+   search? Exported so a test can hold the build to entries that are used: a
+   bake whose every entry was refused would cost nothing visible, and save
+   nothing either. */
+function entryFits(body, e) { return fromTable(body, e) !== undefined; }
+
+root.Pearl = { harvest, bake, bodyKey, entryFits, pick, isPearl, usable, hasMainVerb, score, sentences, paragraphs, plain, clean,
+               weakWords, aimWords, steps, lesson, matchingFigure, passageSpan, passageContext, subject, runs, MIN, MAX, MAX_RUN, AIM_CEILING };
+
+})(typeof window !== 'undefined' ? window : this);

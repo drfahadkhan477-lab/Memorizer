@@ -1,0 +1,30 @@
+/* Systole's Contrast theme, as shipped at drnerd 396a465: its picker entry, its palette block and the :root defaults.
+   Memorizer's Contrast is ported from these; tests/verify-memorizer-appearance-pure.js compares against them.
+   When Systole changes the theme, re-extract these three pieces from drnerd's stylesheet and app/systole.html. */
+{id:'contrast', name:'Contrast',  group:'dark',  mode:'dark',  palette:'contrast',  bg:'#060606',ac:'#38BDF8',bar:'#060606'}
+html[data-theme="dark"][data-palette="contrast"]{
+  --bg:#060606;--card:#121212;--white:#121212;
+  --border:#666666;--border2:#4A4A4A;--border3:#7A7A7A;
+  --text:#FAFAFA;--muted:#D6D6D6;--dim:#9E9E9E;--faint:#3A3A3A;
+  --accent:#38BDF8;--accent-2:#7DD3FC;--teal:var(--accent);--teal2:var(--accent-2);--teal-ink:var(--accent);
+  --teal3:#0C4A6E;--teal4:#082F49;
+  --navy:#141414;--navy2:#1E1E1E;--navy3:#282828;
+  --shadow-glow:0 0 0 3px rgba(56,189,248,.32);
+  --hero-a:#0A0A0A;--hero-b:#151515;--hero-c:#050505;
+  --hero-edge:rgba(56,189,248,.32);
+  --aura-1:rgba(56,189,248,.22);--aura-2:rgba(125,211,252,.16);--aura-3:rgba(255,255,255,.10);
+  --hero-accent:#7DD3FC;
+}
+
+:root{
+  --sat:env(safe-area-inset-top,0px);
+  --sab:env(safe-area-inset-bottom,0px);
+  --sal:env(safe-area-inset-left,0px);
+  --sar:env(safe-area-inset-right,0px);
+  /* The reading measure, in one place. #app and the bar's contents both use
+     it, which is what keeps the wordmark above the column it belongs to. */
+  --measure:780px;
+  /* And the bar's own height, which the panes below have to step around. It
+     grows at the tablet breakpoint, so it cannot be a literal in three rules. */
+  --navh:58px;
+}
