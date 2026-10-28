@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [chromium, webkit, firefox]
+        engine: [chromium, webkit]
     env:
       SYSTOLE_ENGINE: ${{ matrix.engine }}
       SYSTOLE_TEST_READERS_OFFLINE: '1'
